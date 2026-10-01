@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Stack</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#101826;font-family:system-ui,sans-serif;color:#fff;touch-action:none;user-select:none}
+  canvas{display:block;width:100%;height:100%}
+  #hud{position:absolute;top:calc(env(safe-area-inset-top) + 16px);left:0;right:0;text-align:center;pointer-events:none}
+  #score{font-size:64px;font-weight:800}
+  #msg{height:22px;color:#ffd166;font-weight:700}
+  #over{position:absolute;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:12px;background:#000a}
+  #over h2{margin:0;font-size:32px}
+  #over p{margin:0 0 8px;color:#b8c4d6}
+  #over button{width:220px;padding:14px;border:0;border-radius:12px;font-size:17px;font-weight:700}
+  #again{background:#ffd166;color:#101826}
+  #share{background:#243349;color:#fff}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"><div id="score">0</div><div id="msg"></div></div>
+<div id="over">
+  <h2 id="final"></h2>
+  <p id="best"></p>
+  <button id="again">Play again</button>
+  <button id="share">Challenge a friend</button>
+</div>
+
+<script>
+const tg = window.Telegram?.WebApp;
+if (tg) { tg.ready(); tg.expand(); tg.setHeaderColor?.('#101826'); tg.setBackgroundColor?.('#101826'); tg.disableVerticalSwipes?.(); }
+
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const $ = id => document.getElementById(id);
+const LW = 360, BH = 28, START_W = 200;
+let scale, LH;
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = innerWidth * dpr; cv.height = innerHeight * dpr;
+  scale = innerWidth / LW; LH = innerHeight / scale;
+  ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
+}
+addEventListener('resize', resize); resize();
+
+let stack, cur, speed, cam, camTarget, pieces, score, combo, alive, best = 0;
+
+function reset() {
+  stack = [{ x: (LW - START_W) / 2, w: START_W }];
+  speed = 2.4; cam = 0; camTarget = 0; pieces = []; score = 0; combo = 0; alive = true;
+  spawn(); $('over').style.display = 'none'; $('score').textContent = 0; $('msg').textContent = '';
+}
+function spawn() {
+  const top = stack[stack.length - 1];
+  cur = { x: -top.w, w: top.w, dir: 1 };
+}
+const blockY = i => LH - 140 - i * BH + cam;
+const color = (i, l = 58) => `hsl(${(i * 11 + 200) % 360} 75% ${l}%)`;
+
+function drop() {
+  if (!alive) return;
+  const top = stack[stack.length - 1];
+  const dx = cur.x - top.x;
+  const overlap = cur.w - Math.abs(dx);
+  const idx = stack.length;
+  if (overlap <= 0) { // miss
+    pieces.push({ x: cur.x, w: cur.w, y: blockY(idx), vy: 0, i: idx });
+    return gameOver();
+  }
+  if (Math.abs(dx) < 5) { // perfect
+    combo++;
+    stack.push({ x: top.x, w: Math.min(START_W, top.w + (combo >= 3 ? 6 : 0)) });
+    $('msg').textContent = combo >= 3 ? `Perfect x${combo}` : 'Perfect';
+    tg?.HapticFeedback?.impactOccurred('medium');
+  } else {
+    combo = 0;
+    const nx = Math.max(cur.x, top.x);
+    stack.push({ x: nx, w: overlap });
+    const cutX = dx > 0 ? nx + overlap : cur.x;
+    pieces.push({ x: cutX, w: cur.w - overlap, y: blockY(idx), vy: 0, i: idx });
+    $('msg').textContent = '';
+    tg?.HapticFeedback?.impactOccurred('light');
+  }
+  score++; $('score').textContent = score;
+  speed = Math.min(8, 2.4 + score * 0.09);
+  camTarget = Math.max(0, (stack.length - 5) * BH);
+  spawn();
+}
+
+function gameOver() {
+  alive = false; cur = null;
+  tg?.HapticFeedback?.notificationOccurred('error');
+  if (score > best) { best = score; saveBest(); }
+  $('final').textContent = `Height ${score}`;
+  $('best').textContent = `Best ${best}`;
+  setTimeout(() => $('over').style.display = 'flex', 500);
+}
+
+function saveBest() {
+  try { localStorage.setItem('stack_best', best); } catch {}
+  tg?.CloudStorage?.setItem('stack_best', String(best));
+}
+function loadBest() {
+  try { best = +localStorage.getItem('stack_best') || 0; } catch {}
+  tg?.CloudStorage?.getItem?.('stack_best', (e, v) => { if (!e && v) best = Math.max(best, +v); });
+}
+
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(2, (now - last) / 16.67); last = now;
+  if (cur) {
+    cur.x += cur.dir * speed * dt;
+    if (cur.x + cur.w > LW + 20) cur.dir = -1;
+    if (cur.x < -20) cur.dir = 1;
+  }
+  cam += (camTarget - cam) * 0.1 * dt;
+  pieces.forEach(p => { p.vy += 0.5 * dt; p.y += p.vy * dt; });
+  pieces = pieces.filter(p => p.y < LH + 60);
+
+  const g = ctx.createLinearGradient(0, 0, 0, LH);
+  const h = (score * 4) % 360;
+  g.addColorStop(0, `hsl(${(215 + h) % 360} 45% 14%)`);
+  g.addColorStop(1, `hsl(${(235 + h) % 360} 40% 7%)`);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, LW, LH);
+
+  stack.forEach((b, i) => {
+    const y = blockY(i);
+    if (y > LH || y < -BH) return;
+    ctx.fillStyle = color(i); ctx.fillRect(b.x, y, b.w, BH - 2);
+    ctx.fillStyle = '#ffffff22'; ctx.fillRect(b.x, y, b.w, 4);
+  });
+  if (cur) {
+    const i = stack.length;
+    ctx.fillStyle = color(i); ctx.fillRect(cur.x, blockY(i), cur.w, BH - 2);
+    ctx.fillStyle = '#ffffff22'; ctx.fillRect(cur.x, blockY(i), cur.w, 4);
+  }
+  pieces.forEach(p => { ctx.fillStyle = color(p.i, 45); ctx.fillRect(p.x, p.y, p.w, BH - 2); });
+  requestAnimationFrame(frame);
+}
+
+cv.addEventListener('pointerdown', drop);
+addEventListener('keydown', e => e.code === 'Space' && drop());
+$('again').onclick = reset;
+$('share').onclick = () => {
+  const text = `I stacked ${score} blocks. Beat me!`;
+  const url = `https://t.me/share/url?url=${encodeURIComponent(location.href)}&text=${encodeURIComponent(text)}`;
+  tg?.openTelegramLink ? tg.openTelegramLink(url) : window.open(url, '_blank');
+};
+
+loadBest(); reset(); requestAnimationFrame(frame);
+</script>
+</body>
+  </html>
